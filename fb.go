@@ -47,6 +47,9 @@ func Open(device string) (*Device, error) {
 		0, int(varInfo.xres*varInfo.yres*varInfo.bits_per_pixel/8),
 		syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED,
 	)
+
+	buffer := make([]byte, varInfo.xres*varInfo.yres*varInfo.bits_per_pixel/8)
+
 	if err != nil {
 		file.Close()
 		return nil, err
@@ -57,13 +60,19 @@ func Open(device string) (*Device, error) {
 		varInfo.green.offset == 5 && varInfo.green.length == 6 && varInfo.green.msb_right == 0 &&
 		varInfo.blue.offset == 0 && varInfo.blue.length == 5 && varInfo.blue.msb_right == 0 {
 		colorModel = rgb565ColorModel{}
+	} else if varInfo.red.offset == 16 && varInfo.red.length == 8 && varInfo.red.msb_right == 0 &&
+		varInfo.green.offset == 8 && varInfo.green.length == 8 && varInfo.green.msb_right == 0 &&
+		varInfo.blue.offset == 0 && varInfo.blue.length == 8 && varInfo.blue.msb_right == 0 {
+		colorModel = bgraColorModel{}
 	} else {
+
 		return nil, errors.New("unsupported color model")
 	}
 
 	return &Device{
 		file,
 		pixels,
+		buffer,
 		int(fixInfo.line_length),
 		image.Rect(0, 0, int(varInfo.xres), int(varInfo.yres)),
 		colorModel,
@@ -74,6 +83,7 @@ func Open(device string) (*Device, error) {
 type Device struct {
 	file       *os.File
 	pixels     []byte
+	buffer     []byte
 	pitch      int
 	bounds     image.Rectangle
 	colorModel color.Model
@@ -89,6 +99,10 @@ func (d *Device) Close() {
 // Bounds implements the image.Image (and draw.Image) interface.
 func (d *Device) Bounds() image.Rectangle {
 	return d.bounds
+}
+
+func (d *Device) Rollover() {
+	copy(d.pixels, d.buffer)
 }
 
 // ColorModel implements the image.Image (and draw.Image) interface.
@@ -111,16 +125,17 @@ func (d *Device) Set(x, y int, c color.Color) {
 	// the min bounds are at 0,0 (see Open)
 	if x >= 0 && x < d.bounds.Max.X &&
 		y >= 0 && y < d.bounds.Max.Y {
+
 		r, g, b, a := c.RGBA()
-		if a > 0 {
-			rgb := toRGB565(r, g, b)
-			i := y*d.pitch + 2*x
-			// This assumes a little endian system which is the default for
-			// Raspbian. The d.pixels indices have to be swapped if the target
-			// system is big endian.
-			d.pixels[i+1] = byte(rgb >> 8)
-			d.pixels[i] = byte(rgb & 0xFF)
-		}
+		a = 0
+
+		i := (y*d.bounds.Max.X + x) * 4
+
+		d.pixels[i] = byte(b)
+		d.pixels[i+1] = byte(g)
+		d.pixels[i+2] = byte(r)
+		d.pixels[i+3] = byte(a)
+
 	}
 }
 
@@ -180,5 +195,30 @@ func (c rgb565) RGBA() (r, g, b, a uint32) {
 	g = uint32(gBits<<5 | gBits>>1 | gBits>>7)
 	b = uint32(bBits<<11 | bBits<<6 | bBits<<1 | bBits>>4)
 	a = 0xFFFF
+	return
+}
+
+// The default color model under virtuasl mchines is BGR. Each pixel is
+// represented by four bytes, with 8 bits for blue, 8 bits for green and 8 bits
+// for red and 8 bits for alpha.
+
+type bgraColorModel struct{}
+
+func (bgraColorModel) Convert(c color.Color) color.Color {
+	r, g, b, a := c.RGBA()
+	return toBGRA(r, g, b, a)
+}
+
+func toBGRA(r, g, b, a uint32) bgra {
+	return [4]byte{byte(b), byte(g), byte(r), byte(a)}
+}
+
+type bgra [4]byte
+
+// RGBA implements the color.Color interface.
+func (c bgra) RGBA() (r, g, b, a uint32) {
+	temp := b
+	b = r
+	r = temp
 	return
 }
